@@ -1,0 +1,96 @@
+@Library('tfs_functions') _
+CONFIG_PATH = "\$/${env.JOB_NAME}/Jenkins"
+node('windows') {
+ def sourceRepo = 'https://code.experian.local/scm/su/16651-iiq-webservice.git'
+ def rootpath = 'Main'
+ def solution = 'Experian.AuthIQ.Services.sln'
+ def projectName = 'Experian.AuthIQ.Services.WebService'
+ def projectFolder = 'Experian.CSharp.AuthIQWebService.WebService'
+ def outfileName = '16651_IdentityIQWebService'
+ def deployFolder = 'DeployItems'
+ def veracodeName = '16651-Identity IQ (IIQ) Web Service'
+ 
+ stage('Preparation') {
+  checkout changelog: false,
+   poll: false,
+   scm: [
+    $class: 'GitSCM',
+    branches: [
+     [name: 'JenkinsBuild']
+    ],
+    userRemoteConfigs: [
+     [credentialsId: '2f73a82a-a53a-47f2-a2ff-efbc5f8e4faf',
+      url: "${sourceRepo}"
+     ]
+    ],
+    extensions: [
+     [$class: 'CloneOption', noTags: false, reference: '', timeout: 60]
+    ]
+   ]
+
+  dir('packages') {
+   deleteDir()
+  }
+  bat "\"${tool 'NuGet'}\" restore \"${rootpath}\\${solution}\""
+ }
+ 
+	stage('Compile-Debug') {
+	
+	  bat "\"${tool 'MSBuild2019'}\\MSBuild.exe\" \"${rootpath}\\${solution}\" /t:rebuild /p:IntermediateOutputPath=c:/temp/ /p:Configuration=Debug /p:Platform=\"Any CPU\" /p:DeployOnBuild=true /p:ProjectName=\"${projectName}\" /p:PublishProfile=Anywhere"
+	} 
+ 
+ stage('Compile-Release') {
+  changeAsmVer assemblyFile: "${rootpath}/VersionInfo.cs", regexPattern: 'AssemblyFileVersion\\("(\\d+).(\\d+).(\\d+).(\\d+)"\\)', replacementPattern: 'AssemblyFileVersion("$1.$2.$3.%s")', versionPattern: '$BUILD_NUMBER'
+  bat "\"${tool 'MSBuild2019'}\\MSBuild.exe\" \"${rootpath}\\${solution}\" /t:rebuild  /p:Configuration=Release /p:Platform=\"Any CPU\" /p:DeployOnBuild=true /p:ProjectName=${projectName} /p:PublishProfile=\"Anywhere.pubxml\""
+ } 
+ 
+ def versionNumber = '0.0.0.0'
+    def zipFileName = 'temp'
+    stage('Zip') {
+
+        readFile("${rootpath}/VersionInfo.cs").split('\n').each { line ->
+            if (line.length() > 30 && line.substring(0,2) != "//" && line.contains('AssemblyFileVersion')) {
+                versionNumber = line.substring(line.indexOf("(\"")+2, line.lastIndexOf("\")"));
+                zipFileName = "${outfileName}_Release_${versionNumber}.zip"
+            }
+            // Only use AssemblyVersion if we don't have AssemblyFileVersion
+            if (versionNumber == '0.0.0.0' && line.length() > 30 && line.substring(0,2) != "//" && line.contains('AssemblyVersion')) {
+                versionNumber = line.substring(line.indexOf("(\"")+2, line.lastIndexOf("\")"));
+                zipFileName = "${outfileName}_Release_${versionNumber}_${BUILD_NUMBER}.zip"
+            }
+        }        
+       
+        zip archive: true, dir: "${rootpath}/${projectFolder}/${deployFolder}", glob: '', zipFile: "${zipFileName}"
+    }
+ 
+
+ //stage('Archive') {
+  //script {
+   //ARTIFACTORY_SERVER = "cs_artifactory"
+   //ARCHIVE_FILE = "${outfileName}_${versionNumber}_#${BUILD_NUMBER}.zip"
+   //TARGET = "idf-apps-builds-local\\${projectName}\\${ARCHIVE_FILE}"
+  //}
+ //}
+  
+     stage('Veracode Upload') {
+        withCredentials([usernamePassword(credentialsId: 'veracode-credentials', passwordVariable: 'veracode_key', usernameVariable: 'veracode_id'), usernamePassword(credentialsId: '2f73a82a-a53a-47f2-a2ff-efbc5f8e4faf', passwordVariable: 'proxy_password', usernameVariable: 'proxy_user')]) {
+        veracode applicationName: "${veracodeName}", 
+        canFailJob: false, 
+        criticality: 'High', 
+        debug: true,             
+        sandboxName: 'Jenkins', createSandbox: true, 
+        scanName: "${versionNumber}",
+        filepath: 'a',
+        uploadIncludesPattern: "${rootpath}\\${projectFolder}\\${deployFolder}\\*.zip", 
+        // useIDkey: true, vid: veracode_id, vkey: veracode_key,
+		useIDkey: true, vid: "e27a631e3d2198cfc51462206696b120", vkey: "19e3ce35fdc0bfb936a9bba041ac73357a7ee82b5080cf3245b3fe0b0b55f879f750e9c1737ade7538c468bfdb039bf19fbc26bedad45945350079b7d3342dec",
+        pHost: 'websweeper', pPassword: "${proxy_password}",
+        useProxy: true,
+        pPort: '9090', pUser: "${proxy_user}"
+        }
+	 }  
+
+  stage('Cleanup') {
+   cleanWs notFailBuild: true
+  }
+ }
